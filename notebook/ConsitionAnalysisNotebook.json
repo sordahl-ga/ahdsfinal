@@ -1,0 +1,935 @@
+{
+	"name": "ConditionAnalysisNotebook",
+	"properties": {
+		"nbformat": 4,
+		"nbformat_minor": 2,
+		"bigDataPool": {
+			"referenceName": "AHDS24MLPOOL",
+			"type": "BigDataPoolReference"
+		},
+		"sessionProperties": {
+			"driverMemory": "56g",
+			"driverCores": 8,
+			"executorMemory": "56g",
+			"executorCores": 8,
+			"numExecutors": 2,
+			"runAsWorkspaceSystemIdentity": false,
+			"conf": {
+				"spark.dynamicAllocation.enabled": "false",
+				"spark.dynamicAllocation.minExecutors": "2",
+				"spark.dynamicAllocation.maxExecutors": "2",
+				"spark.autotune.trackingId": "c0660ffb-b3a3-4ae6-a2b7-ef029d67dd77"
+			}
+		},
+		"metadata": {
+			"saveOutput": true,
+			"enableDebugMode": false,
+			"kernelspec": {
+				"name": "synapse_pyspark",
+				"display_name": "Synapse PySpark"
+			},
+			"language_info": {
+				"name": "python"
+			},
+			"a365ComputeOptions": {
+				"id": "/subscriptions/de91991f-4607-4d0e-80fc-66a33f4e1681/resourceGroups/ahdschallenge/providers/Microsoft.Synapse/workspaces/stoahdssynapse/bigDataPools/AHDS24MLPOOL",
+				"name": "AHDS24MLPOOL",
+				"type": "Spark",
+				"endpoint": "https://stoahdssynapse.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/AHDS24MLPOOL",
+				"auth": {
+					"type": "AAD",
+					"authResource": "https://dev.azuresynapse.net"
+				},
+				"sparkVersion": "2.4",
+				"nodeCount": 10,
+				"cores": 8,
+				"memory": 56,
+				"automaticScaleJobs": false
+			},
+			"sessionKeepAliveTimeout": 30
+		},
+		"cells": [
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Import Libraries and Set Environment Variables\r\n",
+					"You will need the following information:\r\n",
+					"1. Your Azure Subscription Id\r\n",
+					"2. Your Azure Synapse Workspace Name\r\n",
+					"3. Your Azure Synapse SQL Admin user name (typically sqladminuser)\r\n",
+					"4. Your Azure Sybapse SQL Admin Password\r\n",
+					"5. The resource group name that your Azure Synapse Analytics was deployed\r\n",
+					"6. Default Storage Account URL for your Azure Synapse Environment\r\n",
+					"7. Default Storage Account Access Key for your Azure Synapse Environment "
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"import pandas as pd\r\n",
+					"from pyspark.sql.types import ArrayType, StructType\r\n",
+					"from pyspark.sql.functions import explode_outer, col, arrays_zip\r\n",
+					"from azureml.core import Workspace\r\n",
+					"import os\r\n",
+					"from pyspark.sql.functions import pandas_udf, explode, when, concat, lit\r\n",
+					"import seaborn as sns\r\n",
+					"import matplotlib.pyplot as plt\r\n",
+					"import scipy.stats as stats\r\n",
+					"from scipy.stats import chi2_contingency\r\n",
+					"hostname=\"<your synapse workspace name>-ondemand.sql.azuresynapse.net\"\r\n",
+					"synapsedbuser=\"<your synapse SQL Admin user name>\" #Note: In production you need to Store information in Azure KeyVault and retrieve it: TokenLibrary.getSecret('<kv-name>', 'synapsedbuser')\r\n",
+					"synapsedbpw=\"<your synapse SQL Admin user password>\" #Note: In production you need to Store information in Azure KeyVault and retrieve it: TokenLibrary.getSecret('<kv-name>', 'synapsedbpw')\r\n",
+					"subscription_id=\"<subscription id>\"\r\n",
+					"resource_group = \"<resource group>\"\r\n",
+					"workspace_name = \"ahdschallenge6ml\"\r\n",
+					"storageaccounturl=\"<your storage account url>\" #Note: In production you need to Store information in Azure KeyVault and retrieve it: TokenLibrary.getSecret('<kv-name>', 'STORAGE-URL')\r\n",
+					"storageaccountkey= \"<your storage account key>\" #Note: In production you need to Store information in Azure KeyVault and retrieve it: TokenLibrary.getSecret('<kv-name>', 'STORAGE-KEY')"
+				],
+				"execution_count": 1
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Load the ConditionView into a DataFrame\r\n",
+					"You can load load data using a standard SQL Connection directly into a spark data frame"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Connect to our Condition View using Synpase SQL DB\r\n",
+					"port = \"1433\"\r\n",
+					"database = \"fhirdb\"\r\n",
+					"jdbcUrl = f\"jdbc:sqlserver://{hostname}:{port};database={database}\"\r\n",
+					"df = spark.read.format(\"jdbc\") \\\r\n",
+					"     .option(\"url\", jdbcUrl) \\\r\n",
+					"     .option(\"dbtable\",\"fhir.ConditionView\") \\\r\n",
+					"     .option(\"user\", synapsedbuser) \\\r\n",
+					"     .option(\"password\",synapsedbpw) \\\r\n",
+					"     .option(\"driver\",\"com.microsoft.sqlserver.jdbc.SQLServerDriver\") \\\r\n",
+					"     .load()\r\n",
+					"df.printSchema()\r\n",
+					""
+				],
+				"execution_count": 9
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Calculate the MultiDayLOS flag\r\n",
+					"This cell calculates a MultiDayLos flag and adds it as a column to our dataframe and displays distrubution as a histogram"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"df = df.withColumn(\"MultiDayLOS\", when(col('LOSDays') > 1, 1).otherwise(0))\r\n",
+					"df_pd = df.select('MultiDayLOS').toPandas()\r\n",
+					"df_pd.hist()"
+				],
+				"execution_count": 10
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#### Scatter Plot to see effect of Age on EncounterCost\r\n",
+					"This cell demonstrates one of the many data visualization exploration tools available in pyspark"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"dfp=df.toPandas()\r\n",
+					"plt.scatter(dfp['EncounterCost'], dfp['Age'])"
+				],
+				"execution_count": 11
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Select Features for Auto ML Training\r\n",
+					"After our data exploration we have identified a list of features that we think might correaltate to a predictive model. We will add these features to a dataframe, then split the data to sample training rows and validation rows"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"feature_df = df.select('ConditionCode','Age','Gender','ProcedureCount','MultiDayLOS','EncounterType')\r\n",
+					"feature_df.show(10)\r\n",
+					"training_data, validation_data = feature_df.randomSplit([0.8,0.2], 223)\r\n",
+					"print(training_data.count())\r\n",
+					"print(validation_data.count())"
+				],
+				"execution_count": 12
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Create Azure ML Workspace\r\n",
+					"Note: If you have alrady created workspace proceed to the Connect to Azure ML Workspace.</br>\r\n",
+					"This cell will create a new Azure ML Workspace for us to run our model experiments"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Create an Azure ML Workspace\r\n",
+					"\r\n",
+					"ws = Workspace.create(name=workspace_name,\r\n",
+					"                         subscription_id=subscription_id,\r\n",
+					"                         resource_group=resource_group,\r\n",
+					"                         create_resource_group=True,\r\n",
+					"                         location='eastus')"
+				],
+				"execution_count": 5
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Connect to Azure ML Workspace\r\n",
+					"Note: You can skip this step if you created a new workspace above</br>\r\n",
+					"This cell will connect to an existing Azure ML Workspace for us to run our model experiments"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Connect to Azure ML Workspace\r\n",
+					"ws = Workspace(workspace_name = workspace_name,\r\n",
+					"               subscription_id = subscription_id,\r\n",
+					"               resource_group = resource_group)"
+				],
+				"execution_count": 13
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Convert Training Data to Azure ML TabularData Set\r\n",
+					"We will take our sampled training data set and convert it to a tabular format and upload the data to our Azure ML workspace datastore"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from azureml.core import Dataset\r\n",
+					"\r\n",
+					"# Get the Azure Machine Learning default datastore\r\n",
+					"datastore = ws.get_default_datastore()\r\n",
+					"training_pd = training_data.toPandas().to_csv('training_pd.csv', index=False)\r\n",
+					"\r\n",
+					"# Convert into an Azure Machine Learning tabular dataset\r\n",
+					"datastore.upload_files(files = ['training_pd.csv'],\r\n",
+					"                       target_path = 'train-dataset/tabular/',\r\n",
+					"                       overwrite = True,\r\n",
+					"                       show_progress = True)\r\n",
+					"dataset_training = Dataset.Tabular.from_delimited_files(path = [(datastore, 'train-dataset/tabular/training_pd.csv')])"
+				],
+				"execution_count": 14
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Define Training settings\r\n",
+					"Defines the runtime settings for our experiment configuration"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"import logging\r\n",
+					"\r\n",
+					"automl_settings = {\r\n",
+					"    \"iteration_timeout_minutes\": 10,\r\n",
+					"    \"experiment_timeout_minutes\": 30,\r\n",
+					"    \"enable_early_stopping\": True,\r\n",
+					"    \"primary_metric\": 'r2_score',\r\n",
+					"    \"featurization\": 'auto',\r\n",
+					"    \"verbosity\": logging.INFO,\r\n",
+					"    \"n_cross_validations\": 2}"
+				],
+				"execution_count": 15
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Configure Auto ML\r\n",
+					"Configure our Auto ML Learning experiment.</br>\r\n",
+					"More information available [here](https://learn.microsoft.com/en-us/python/api/azureml-train-automl-client/azureml.train.automl.automlconfig.automlconfig?view=azure-ml-py)"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from azureml.train.automl import AutoMLConfig\r\n",
+					"label = \"MultiDayLOS\"\r\n",
+					"automl_config = AutoMLConfig(task='regression',\r\n",
+					"                             debug_log='automated_ml_errors.log',\r\n",
+					"                             training_data = dataset_training,\r\n",
+					"                             spark_context = sc,\r\n",
+					"                             model_explainability = False, \r\n",
+					"                             label_column_name =label,**automl_settings)"
+				],
+				"execution_count": 16
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Train the automatic regression Model\r\n",
+					"This cell will train our regression model automatically with the configuration and data provided.  You will see progress of the experiment as it tries to determine the best predictive model to use. "
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from azureml.core.experiment import Experiment\r\n",
+					"\r\n",
+					"# Start an experiment in Azure Machine Learning\r\n",
+					"experiment = Experiment(ws, \"aml-ahds-synapse-regression\")\r\n",
+					"tags = {\"Synapse\": \"regression\"}\r\n",
+					"local_run = experiment.submit(automl_config, show_output=True, tags = tags)\r\n",
+					"\r\n",
+					"# Use the get_details function to retrieve the detailed output for the run.\r\n",
+					"run_details = local_run.get_details()"
+				],
+				"execution_count": 17
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Retrieve the best model\r\n",
+					"At the end of the auto ml training run the best fitted model can be retrieved from the run output"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Get best model\r\n",
+					"best_run, fitted_model = local_run.get_output()"
+				],
+				"execution_count": 18
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Test Model Accuracy\r\n",
+					"Now we will test our models accuracy in predicting MultiDayLOS using our sampled validation data."
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Test best model accuracy\r\n",
+					"validation_data_pd = validation_data.toPandas()\r\n",
+					"y_test = validation_data_pd.pop(label).to_frame()\r\n",
+					"y_predict = fitted_model.predict(validation_data_pd)"
+				],
+				"execution_count": 19
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Root Mean Square\r\n",
+					"Mean Square Error (MSE) is a risk function that helps us determine the average squared difference between the predicted and the actual value of a feature or variable.</br> Root Mean Square Error, is the square root of value obtained from Mean Square Error function. "
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from sklearn.metrics import mean_squared_error\r\n",
+					"from math import sqrt\r\n",
+					"\r\n",
+					"# Calculate root-mean-square error\r\n",
+					"y_actual = y_test.values.flatten().tolist()\r\n",
+					"rmse = sqrt(mean_squared_error(y_actual, y_predict))\r\n",
+					"\r\n",
+					"print(\"Root Mean Square Error:\")\r\n",
+					"print(rmse)"
+				],
+				"execution_count": 20
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### MAPE and Accuracy\r\n",
+					"Mean Absolute Percent Error (MAPE) the average magnitude of error produced by a model, or how far off predictions are on average.</br>\r\n",
+					"The model average accuracy is simply 1-MAPE"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"# Calculate mean-absolute-percent error and model accuracy \r\n",
+					"sum_actuals = sum_errors = 0\r\n",
+					"\r\n",
+					"for actual_val, predict_val in zip(y_actual, y_predict):\r\n",
+					"    abs_error = actual_val - predict_val\r\n",
+					"    if abs_error < 0:\r\n",
+					"        abs_error = abs_error * -1\r\n",
+					"\r\n",
+					"    sum_errors = sum_errors + abs_error\r\n",
+					"    sum_actuals = sum_actuals + actual_val\r\n",
+					"\r\n",
+					"mean_abs_percent_error = sum_errors / sum_actuals\r\n",
+					"\r\n",
+					"print(\"Model MAPE:\")\r\n",
+					"print(mean_abs_percent_error)\r\n",
+					"print()\r\n",
+					"print(\"Model Accuracy:\")\r\n",
+					"print(1 - mean_abs_percent_error)"
+				],
+				"execution_count": 21
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Model fitting to Data Test\r\n",
+					"Using visualization tools in pyspark library we can see how the model fits using our sample test data."
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"import matplotlib.pyplot as plt\r\n",
+					"import numpy as np\r\n",
+					"from sklearn.metrics import mean_squared_error, r2_score\r\n",
+					"\r\n",
+					"# Calculate the R2 score by using the predicted and actual fare prices\r\n",
+					"y_test_actual = y_test[label]\r\n",
+					"r2 = r2_score(y_test_actual, y_predict)\r\n",
+					"\r\n",
+					"# Plot the actual versus predicted fare amount values\r\n",
+					"plt.style.use('ggplot')\r\n",
+					"plt.figure(figsize=(10, 7))\r\n",
+					"plt.scatter(y_test_actual,y_predict)\r\n",
+					"plt.plot([np.min(y_test_actual), np.max(y_test_actual)], [np.min(y_test_actual), np.max(y_test_actual)], color='lightblue')\r\n",
+					"plt.xlabel(\"Actual \" + label)\r\n",
+					"plt.ylabel(\"Predicted \" + label)\r\n",
+					"plt.title(\"Actual vs Predicted \"+label+\" Amount R^2={}\".format(r2))\r\n",
+					"plt.show()"
+				],
+				"execution_count": 22
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Register Model to Azure ML for Publication\r\n",
+					"If the accuracy of the model is acceptable we can publish it via Azure ML to be consumed in realtime work flows.  We will first register our validated model with Azure ML for publishing."
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"import os\r\n",
+					"description = 'My automated '+label +' ML model'\r\n",
+					"model_path='outputs/model.pkl'\r\n",
+					"model = best_run.register_model(model_name = label+'Model', model_path = model_path, description = description)\r\n",
+					"print(model.name, model.version)\r\n",
+					"model.download(target_dir=os.getcwd(), exist_ok=True)"
+				],
+				"execution_count": 23
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Initialize Scoring Environment\r\n",
+					"This cell installs dependencies needed by our published scoring environment based on the best fitting model"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from azureml.core import Environment\r\n",
+					"from azureml.core.conda_dependencies import CondaDependencies\r\n",
+					"#Initialize the environment (pip packages to be installed, example shown below)\r\n",
+					"environment = Environment(label+\"ScoreEnv\")\r\n",
+					"environment.python.conda_dependencies = CondaDependencies.create(pip_packages=[\r\n",
+					" 'azureml-defaults==1.32.0',\r\n",
+					" 'azureml-interpret==1.32.0',\r\n",
+					" 'azureml-automl-runtime==1.32.0',\r\n",
+					" 'numpy>=1.16.0,<1.19.0',\r\n",
+					" 'xgboost==0.90',\r\n",
+					" 'scikit-learn==0.22.1',\r\n",
+					" 'inference-schema',\r\n",
+					" 'joblib',\r\n",
+					" 'tensorflow==1.14',\r\n",
+					" 'pandas==0.25.1',\r\n",
+					" 'fbprophet==0.5',\r\n",
+					" 'holidays==0.9.11',\r\n",
+					" 'psutil>=5.2.2,<6.0.0'\r\n",
+					"])"
+				],
+				"execution_count": 24
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Copy Score Script from Blob Storage\r\n",
+					"We need to provide Azure ML a scoring script, this was previously uploaded to our resource container in our Synapse Storage account we will now load it locally for inclusion in our published scoring model."
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"from azure.storage.blob import BlobServiceClient\r\n",
+					"localfilename= 'score.py'\r\n",
+					"containername= 'resources'\r\n",
+					"blobname= 'scoring_file_v_1_0_0.py'\r\n",
+					"blob_service_client_instance = BlobServiceClient(account_url=storageaccounturl, credential=storageaccountkey)\r\n",
+					"blob_client_instance = blob_service_client_instance.get_blob_client(containername, blobname, snapshot=None)\r\n",
+					"with open(localfilename, \"wb\") as my_blob:\r\n",
+					"    blob_data = blob_client_instance.download_blob()\r\n",
+					"    blob_data.readinto(my_blob)\r\n",
+					""
+				],
+				"execution_count": 25
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Deploy Model Azure ML Endpoint\r\n",
+					"This cell will create a Webservice endpoint and publish our registered model to it.  At the end of the run you will receive a scoring URI that you can call in realtime to run model prediction"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"#deploy model to service endpoint\r\n",
+					"from azureml.core import Webservice\r\n",
+					"from azureml.core.model import InferenceConfig\r\n",
+					"from azureml.exceptions import WebserviceException\r\n",
+					"score_file=\"score.py\"\r\n",
+					"#name given here will be the name of the deployed service\r\n",
+					"service_name = label+ 'v' + model.version.__str__() + 'predictserv'\r\n",
+					"service_name = service_name.lower()\r\n",
+					"# Remove any existing service under the same name\r\n",
+					"try:\r\n",
+					"    service = Webservice(ws, name=service_name)\r\n",
+					"    if service:\r\n",
+					"        service.delete()\r\n",
+					"except WebserviceException as e:\r\n",
+					"    print()\r\n",
+					"inference_config = InferenceConfig(entry_script= score_file, source_directory=os.getcwd(), environment=environment)\r\n",
+					"service = model.deploy(ws, service_name, [model], inference_config)\r\n",
+					"service.wait_for_deployment(show_output=True)\r\n",
+					"print('Your Scoring URI:' + service.scoring_uri)"
+				],
+				"execution_count": 26
+			},
+			{
+				"cell_type": "markdown",
+				"metadata": {
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"### Test Deployed Service\r\n",
+					"The last step is to call the scoring URL with a feature set to predict a MultiDayLOS"
+				]
+			},
+			{
+				"cell_type": "code",
+				"metadata": {
+					"jupyter": {
+						"source_hidden": false,
+						"outputs_hidden": false
+					},
+					"nteract": {
+						"transient": {
+							"deleting": false
+						}
+					}
+				},
+				"source": [
+					"import requests\r\n",
+					"import json\r\n",
+					"\r\n",
+					"headers = {'Content-Type':'application/json'}\r\n",
+					"\r\n",
+					"if service.auth_enabled:\r\n",
+					"    headers['Authorization'] = 'Bearer '+service.get_keys()[0]\r\n",
+					"\r\n",
+					"print(headers)\r\n",
+					"    \r\n",
+					"test_sample = json.dumps({'data': [\r\n",
+					"\t\t\t\t\t{\r\n",
+					"\t\t\t\t\t\t\"ConditionCode\": 0,\r\n",
+					"\t\t\t\t\t\t\"Age\": 0,\r\n",
+					"\t\t\t\t\t\t\"Gender\": \"male\",\r\n",
+					"\t\t\t\t\t\t\"ProcedureCount\": 0,\r\n",
+					"\t\t\t\t\t\t\"EncounterType\": 0\r\n",
+					"\t\t\t\t\t}\r\n",
+					"\t\t\t\t]})\r\n",
+					"\r\n",
+					"response = requests.post(service.scoring_uri, data=test_sample, headers=headers)\r\n",
+					"print(response.status_code)\r\n",
+					"print(response.elapsed)\r\n",
+					"print(response.json())"
+				],
+				"execution_count": 27
+			}
+		]
+	}
+}
